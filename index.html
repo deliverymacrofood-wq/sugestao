@@ -258,53 +258,69 @@
   <script>
     const STORAGE_KEY = "product_suggestions_v1";
     const VOTES_KEY = "product_votes_v1";
-    const ADMIN_SESSION_KEY = "product_admin_session";
+    const SUPABASE_URL = "https://xtfqtuuatayjqnwiailp.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh0ZnF0dXVhdGF5anFud2lhaWxwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI3Mjk5MDAsImV4cCI6MjEwODMwNTkwMH0.KFgWbpibk2_kapv9rFlFIMgk17dOYyD7z_mzupXb9do";
+    const TABLE_URL = `${SUPABASE_URL}/rest/v1/sugestoes`;
+    const ADMIN_SESSION_KEY = "macrofood_admin_session";
+    let adminAccessToken = sessionStorage.getItem(ADMIN_SESSION_KEY) || "";
 
-    /*
-      Credenciais apenas para demonstração:
-      E-mail: admin@meusite.com
-      Senha: admin123
+    async function supabaseRequest(path, options = {}, token = "") {
+      const headers = {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${token || SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+        ...options.headers
+      };
+      const response = await fetch(`${SUPABASE_URL}${path}`, { ...options, headers });
+      const raw = await response.text();
+      let data = null;
+      try { data = raw ? JSON.parse(raw) : null; } catch { data = raw; }
+      if (!response.ok) throw new Error(data?.message || data?.hint || data?.error_description || `Erro Supabase (${response.status})`);
+      return data;
+    }
 
-      Não use credenciais expostas no JavaScript em um site real.
-    */
-    const ADMIN_EMAIL = "admin@meusite.com";
-    const ADMIN_PASSWORD = "admin123";
+    function mapSuggestion(row) {
+      return {
+        id: row.id,
+        personName: row.person_name,
+        productName: row.product_name,
+        description: row.description || "",
+        category: row.category || "loja",
+        image: row.image || "",
+        votes: Number(row.votes || 0),
+        hidden: Boolean(row.hidden),
+        createdAt: new Date(row.created_at).getTime()
+      };
+    }
 
-    const initialSuggestions = [
-      {
-        id: crypto.randomUUID(),
-        personName: "Marina",
-        productName: "Fone de ouvido sem fio",
-        description: "Um modelo confortável, com bateria duradoura e bom microfone.",
-        category: "promocoes",
-        image: "",
-        votes: 12,
-        hidden: false,
-        createdAt: Date.now() - 30000
-      },
-      {
-        id: crypto.randomUUID(),
-        personName: "Carlos",
-        productName: "Garrafa térmica",
-        description: "Uma garrafa resistente que mantenha a bebida gelada por bastante tempo.",
-        category: "loja",
-        image: "",
-        votes: 8,
-        hidden: false,
-        createdAt: Date.now() - 20000
-      },
-      {
-        id: crypto.randomUUID(),
-        personName: "Bianca",
-        productName: "Mochila impermeável",
-        description: "Uma mochila para notebook com boa organização interna.",
-        category: "loja",
-        image: "",
-        votes: 5,
-        hidden: false,
-        createdAt: Date.now() - 10000
+    async function loadSuggestions() {
+      const rows = await supabaseRequest(`/rest/v1/sugestoes?select=*&order=created_at.desc`);
+      return (rows || []).map(mapSuggestion);
+    }
+
+    async function refreshSuggestions() {
+      try {
+        suggestions = await loadSuggestions();
+        renderSuggestions();
+        if (isAdminLoggedIn()) renderAdminList();
+      } catch (error) {
+        console.error(error);
+        if (!suggestions.length) {
+          elements.grid.innerHTML = `<div class="empty-state"><h3>Não foi possível carregar as sugestões</h3><p>${escapeHtml(error.message)}. Confira as políticas RLS do Supabase.</p></div>`;
+        }
       }
-    ];
+    }
+
+    async function saveSuggestions() {
+      // As alterações são gravadas diretamente no Supabase pelos eventos correspondentes.
+    }
+
+    function loadUserVotes() {
+      try { return JSON.parse(localStorage.getItem(VOTES_KEY)) || []; }
+      catch { return []; }
+    }
+
+    const initialSuggestions = [];
 
     const elements = {
       grid: document.querySelector("#suggestionsGrid"),
@@ -366,10 +382,10 @@
     }
 
     function isAdminLoggedIn() {
-      return sessionStorage.getItem(ADMIN_SESSION_KEY) === "true";
+      return Boolean(adminAccessToken);
     }
 
-    let suggestions = loadSuggestions().map(item => ({ ...item, category: item.category || "loja" }));
+    let suggestions = [];
     let userVotes = loadUserVotes();
     let activeCategory = "todas";
 
@@ -582,7 +598,7 @@
 
     elements.search.addEventListener("input", renderSuggestions);
 
-    elements.grid.addEventListener("click", (event) => {
+    elements.grid.addEventListener("click", async (event) => {
       const voteButton = event.target.closest("[data-vote-id]");
       if (!voteButton) return;
 
@@ -592,13 +608,18 @@
 
       const suggestion = suggestions.find((item) => item.id === id);
       if (!suggestion) return;
-
-      suggestion.votes += 1;
-      userVotes.push(id);
-
-      saveSuggestions();
-      localStorage.setItem(VOTES_KEY, JSON.stringify(userVotes));
-      renderSuggestions();
+      voteButton.disabled = true;
+      try {
+        await supabaseRequest("/rest/v1/rpc/votar_sugestao", {
+          method: "POST", body: JSON.stringify({ sugestao_id: id })
+        });
+        userVotes.push(id);
+        localStorage.setItem(VOTES_KEY, JSON.stringify(userVotes));
+        await refreshSuggestions();
+      } catch (error) {
+        alert(`Não foi possível registrar o voto: ${error.message}`);
+        voteButton.disabled = false;
+      }
     });
 
     elements.suggestionForm.addEventListener("submit", async (event) => {
@@ -652,21 +673,27 @@
         }
       }
 
-      suggestions.push({
-        id: crypto.randomUUID(),
-        personName,
-        productName,
-        description,
-        category,
-        image,
-        votes: 1,
-        hidden: false,
-        createdAt: Date.now()
-      });
+      try {
+        await supabaseRequest("/rest/v1/sugestoes", {
+          method: "POST",
+          headers: { Prefer: "return=representation" },
+          body: JSON.stringify({
+            person_name: personName,
+            product_name: productName,
+            description,
+            category,
+            image,
+            votes: 1,
+            hidden: false
+          })
+        });
+        await refreshSuggestions();
+      } catch (error) {
+        showNotice(elements.suggestionNotice, `Não foi possível salvar no banco: ${error.message}`, "error");
+        return;
+      }
 
-      saveSuggestions();
       elements.suggestionForm.reset();
-      renderSuggestions();
 
       showNotice(
         elements.suggestionNotice,
@@ -692,33 +719,36 @@
       openModal(elements.loginModal);
     });
 
-    elements.loginForm.addEventListener("submit", (event) => {
+    elements.loginForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-
       const email = document.querySelector("#adminEmail").value.trim();
       const password = document.querySelector("#adminPassword").value;
-
-      if (email !== ADMIN_EMAIL || password !== ADMIN_PASSWORD) {
-        showNotice(
-          elements.loginNotice,
-          "E-mail ou senha incorretos.",
-          "error"
-        );
-        return;
+      try {
+        const auth = await supabaseRequest("/auth/v1/token?grant_type=password", {
+          method: "POST", body: JSON.stringify({ email, password })
+        });
+        adminAccessToken = auth.access_token;
+        sessionStorage.setItem(ADMIN_SESSION_KEY, adminAccessToken);
+        // Verifica se a conta tem permissão administrativa no banco.
+        await supabaseRequest("/rest/v1/central_admins?select=user_id&user_id=eq." + encodeURIComponent(auth.user.id), {}, adminAccessToken);
+        closeModal(elements.loginModal);
+        await refreshSuggestions();
+        renderAdminList();
+        openModal(elements.adminModal);
+      } catch (error) {
+        adminAccessToken = "";
+        sessionStorage.removeItem(ADMIN_SESSION_KEY);
+        showNotice(elements.loginNotice, `Login não autorizado ou configuração pendente: ${error.message}`, "error");
       }
-
-      sessionStorage.setItem(ADMIN_SESSION_KEY, "true");
-      closeModal(elements.loginModal);
-      renderAdminList();
-      openModal(elements.adminModal);
     });
 
     elements.logoutButton.addEventListener("click", () => {
       sessionStorage.removeItem(ADMIN_SESSION_KEY);
+      adminAccessToken = "";
       closeModal(elements.adminModal);
     });
 
-    elements.adminList.addEventListener("click", (event) => {
+    elements.adminList.addEventListener("click", async (event) => {
       if (!isAdminLoggedIn()) return;
 
       const toggleButton = event.target.closest("[data-toggle-id]");
@@ -731,10 +761,13 @@
 
         if (!suggestion) return;
 
-        suggestion.hidden = !suggestion.hidden;
-        saveSuggestions();
-        renderAdminList();
-        renderSuggestions();
+        const newHidden = !suggestion.hidden;
+        try {
+          await supabaseRequest(`/rest/v1/sugestoes?id=eq.${encodeURIComponent(suggestion.id)}`, {
+            method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ hidden: newHidden })
+          }, adminAccessToken);
+          await refreshSuggestions();
+        } catch (error) { alert(`Não foi possível alterar a sugestão: ${error.message}`); }
       }
 
       if (deleteButton) {
@@ -749,13 +782,12 @@
 
         if (!confirmed) return;
 
-        suggestions = suggestions.filter((item) => item.id !== id);
-        userVotes = userVotes.filter((voteId) => voteId !== id);
-
-        saveSuggestions();
-        localStorage.setItem(VOTES_KEY, JSON.stringify(userVotes));
-        renderAdminList();
-        renderSuggestions();
+        try {
+          await supabaseRequest(`/rest/v1/sugestoes?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" }, adminAccessToken);
+          userVotes = userVotes.filter((voteId) => voteId !== id);
+          localStorage.setItem(VOTES_KEY, JSON.stringify(userVotes));
+          await refreshSuggestions();
+        } catch (error) { alert(`Não foi possível excluir: ${error.message}`); }
       }
     });
 
@@ -766,6 +798,8 @@
     });
 
     renderSuggestions();
+    refreshSuggestions();
+    setInterval(refreshSuggestions, 30000);
   </script>
 </body>
 </html>
